@@ -1,0 +1,15 @@
+{
+  "name": "ict-signal-bot",
+  "version": "1.0.0",
+  "description": "ICT Gold Terminal — 24/7 real-time signal bot for XAUUSD",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "ws": "^8.17.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
