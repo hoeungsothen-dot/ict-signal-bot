@@ -212,14 +212,43 @@ async function sendTelegram(sig) {
 // ── DEDUP ─────────────────────────────────────────────────────────────────────────
 let lastSignalKey = '';
 let lastSignalTime = 0;
-const SIGNAL_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour cooldown per same signal
+let lastSignalEntry = 0;
+const SIGNAL_COOLDOWN_MS = 90 * 60 * 1000;  // 90 min cooldown per signal direction
+const SIGNAL_ZONE_PTS   = 40;               // ignore new signal if entry within 40pts of last
 
 function shouldSend(sig) {
-  const key = `${sig.dir}_${sig.grade}_${sig.session}_${Math.round(sig.entry / 10) * 10}`;
   const now = Date.now();
-  if (key === lastSignalKey && now - lastSignalTime < SIGNAL_COOLDOWN_MS) return false;
-  lastSignalKey  = key;
-  lastSignalTime = now;
+
+  // ── Quality gate: must have at least sweep OR FVG OR CISD beyond just KZ+fib+DOL
+  const hasQuality = sig.conditions.some(c =>
+    c.includes('sweep') || c.includes('swept') ||
+    c.includes('FVG')   || c.includes('CISD')  ||
+    c.includes('CHoCH')
+  );
+  if (!hasQuality) {
+    console.log(`[SKIP] Grade ${sig.grade} @ ${sig.entry.toFixed(2)} — no sweep/FVG/CISD, only KZ+fib+DOL`);
+    return false;
+  }
+
+  // ── Cooldown: same direction within 90 min
+  const dirKey = `${sig.dir}_${sig.session}`;
+  if (dirKey === lastSignalKey && now - lastSignalTime < SIGNAL_COOLDOWN_MS) {
+    // Allow upgrade: if last signal was B and new is A+ or A++, send anyway
+    if (!(sig.grade === 'A++' || sig.grade === 'A+')) {
+      console.log(`[SKIP] ${sig.dir} @ ${sig.entry.toFixed(2)} — cooldown active (${Math.round((SIGNAL_COOLDOWN_MS-(now-lastSignalTime))/60000)}min left)`);
+      return false;
+    }
+  }
+
+  // ── Zone dedup: entry within 40pts of last signal (price just drifting)
+  if (lastSignalEntry > 0 && Math.abs(sig.entry - lastSignalEntry) < SIGNAL_ZONE_PTS && dirKey === lastSignalKey) {
+    console.log(`[SKIP] ${sig.dir} @ ${sig.entry.toFixed(2)} — too close to last signal @ ${lastSignalEntry.toFixed(2)} (${Math.abs(sig.entry-lastSignalEntry).toFixed(1)}pts)`);
+    return false;
+  }
+
+  lastSignalKey   = dirKey;
+  lastSignalTime  = now;
+  lastSignalEntry = sig.entry;
   return true;
 }
 
