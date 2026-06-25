@@ -421,7 +421,18 @@ async function seedCandles() {
 
 // HTTP server (Railway/Render require a port to stay alive)
 const http = require('http');
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
 http.createServer((req, res) => {
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, CORS);
+    res.end();
+    return;
+  }
   const et    = nowET();
   const hhmm  = et.getHours() * 100 + et.getMinutes();
   const inKZ  = (hhmm >= 200 && hhmm <= 500) || (hhmm >= 830 && hhmm <= 1100);
@@ -446,13 +457,13 @@ http.createServer((req, res) => {
       ],
     };
     sendTelegram(testSig).then(ok => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json', ...CORS });
       res.end(JSON.stringify({ sent: ok, price: livePrice.toFixed(2), message: ok ? 'Check your Telegram group!' : 'Telegram send failed — check TG_TOKEN and TG_CHAT_ID' }));
     });
     return;
   }
 
-  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.writeHead(200, { 'Content-Type': 'application/json', ...CORS });
   res.end(JSON.stringify({
     status: 'running',
     wsConnected: ws?.readyState === 1,
