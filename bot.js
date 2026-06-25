@@ -1,0 +1,339 @@
+/**
+ * ICT Gold Terminal — 24/7 Real-Time Signal Bot
+ * Connects to TwelveData WebSocket → builds live candles → runs ICT signal engine
+ * → sends Telegram alert instantly when B/A+/A++ fires
+ *
+ * Deploy free on Railway or Render (no server needed)
+ * Env vars: TD_KEY, TG_TOKEN, TG_CHAT_ID
+ */
+
+const WebSocket = require('ws');
+
+// ── CONFIG FROM ENV ──────────────────────────────────────────────────────────────
+const TD_KEY     = process.env.TD_KEY     || '';
+const TG_TOKEN   = process.env.TG_TOKEN   || '';
+const TG_CHAT_ID = process.env.TG_CHAT_ID || '';
+
+if (!TD_KEY || !TG_TOKEN || !TG_CHAT_ID) {
+  console.error('Missing env vars: TD_KEY, TG_TOKEN, TG_CHAT_ID');
+  process.exit(1);
+}
+
+// ── CANDLE AGGREGATOR ─────────────────────────────────────────────────────────────
+// Builds OHLC candles from raw price ticks for multiple timeframes
+const INTERVALS = { '5m': 5, '15m': 15, '1h': 60, '4h': 240 };
+const MAX_CANDLES = 100;
+
+const candles = { '5m': [], '15m': [], '1h': [], '4h': [] };
+let currentCandle = { '5m': null, '15m': null, '1h': null, '4h': null };
+
+function getIntervalStart(ts, minutes) {
+  const ms = minutes * 60 * 1000;
+  return Math.floor(ts / ms) * ms;
+}
+
+function processTick(price, ts) {
+  for (const [tf, mins] of Object.entries(INTERVALS)) {
+    const start = getIntervalStart(ts, mins);
+    const cur   = currentCandle[tf];
+
+    if (!cur || cur.t !== start) {
+      // Close previous candle
+      if (cur) {
+        candles[tf].push({ ...cur });
+        if (candles[tf].length > MAX_CANDLES) candles[tf].shift();
+      }
+      // Open new candle
+      currentCandle[tf] = { t: start, o: price, h: price, l: price, c: price };
+    } else {
+      cur.h = Math.max(cur.h, price);
+      cur.l = Math.min(cur.l, price);
+      cur.c = price;
+    }
+  }
+}
+
+// ── ICT SIGNAL ENGINE ─────────────────────────────────────────────────────────────
+function nowET() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+}
+
+function computeSignal() {
+  const h4 = [...candles['4h'], currentCandle['4h']].filter(Boolean);
+  const h1 = [...candles['1h'], currentCandle['1h']].filter(Boolean);
+
+  if (h4.length < 20 || h1.length < 10) return null;
+
+  const et   = nowET();
+  const hhmm = et.getHours() * 100 + et.getMinutes();
+
+  // Kill Zone check
+  const inLDN = hhmm >= 200  && hhmm <= 500;
+  const inNY  = hhmm >= 830  && hhmm <= 1100;
+  const inKZ  = inLDN || inNY;
+  if (!inKZ) return null;
+  const session = inLDN ? 'London' : 'NY';
+
+  const n    = h4.length;
+  const last = h4[n - 1];
+  const prev = h4.slice(-20);
+
+  // Structure
+  const swH = Math.max(...prev.map(c => c.h));
+  const swL = Math.min(...prev.map(c => c.l));
+  const eq  = (swH + swL) / 2;
+
+  const prev3H = Math.max(...h4.slice(-4, -1).map(c => c.h));
+  const prev3L = Math.min(...h4.slice(-4, -1).map(c => c.l));
+  const bos_bull   = last.c > prev3H;
+  const bos_bear   = last.c < prev3L;
+  const choch_bull = last.l < prev3L && last.c > prev3L;
+  const choch_bear = last.h > prev3H && last.c < prev3H;
+
+  // Liquidity sweep
+  const ph = h4.slice(-6, -1).map(c => c.h);
+  const pl = h4.slice(-6, -1).map(c => c.l);
+  const turtleBull = last.l < Math.min(...pl) && last.c > Math.min(...pl);
+  const turtleBear = last.h > Math.max(...ph) && last.c < Math.max(...ph);
+  const bslSwept   = last.h > swH * 0.999 && last.c < swH;
+  const sslSwept   = last.l < swL * 1.001 && last.c > swL;
+  const hasLiqSweep = turtleBull || turtleBear || bslSwept || sslSwept;
+
+  // FVG
+  const fvgs_bull = [], fvgs_bear = [];
+  for (let i = 1; i < n - 1; i++) {
+    if (h4[i-1] && h4[i+1]) {
+      if (h4[i-1].h < h4[i+1].l) fvgs_bull.push({ top: h4[i+1].l, bot: h4[i-1].h });
+      if (h4[i-1].l > h4[i+1].h) fvgs_bear.push({ top: h4[i-1].l, bot: h4[i+1].h });
+    }
+  }
+  const atFvgBull = fvgs_bull.some(f => last.c >= f.bot * 0.998 && last.c <= f.top * 1.002);
+  const atFvgBear = fvgs_bear.some(f => last.c >= f.bot * 0.998 && last.c <= f.top * 1.002);
+  const hasEntryArray = atFvgBull || atFvgBear;
+
+  // CISD
+  const avgRange = h4.slice(-10).reduce((s, c) => s + (c.h - c.l), 0) / 10;
+  const cisd = (last.h - last.l) > avgRange * 1.5 ? (last.c > last.o ? 'bull' : 'bear') : null;
+
+  // H1 MSS
+  const h1n = h1.length;
+  const h1last = h1[h1n - 1];
+  const h1HasMSS = h1n > 3 && h1last && (
+    h1last.c > Math.max(...h1.slice(-4, -1).map(c => c.h)) ||
+    h1last.c < Math.min(...h1.slice(-4, -1).map(c => c.l))
+  );
+  const hasCisd = !!(cisd || h1HasMSS);
+
+  // Score
+  let gs = 0;
+  gs += 2; // KZ confirmed above
+  if (bos_bull || bos_bear)     gs += 1;
+  if (choch_bull || choch_bear) gs += 1;
+  if (hasLiqSweep)              gs += 2;
+  if (hasCisd)                  gs += 1;
+  if (hasEntryArray)            gs += 1;
+  if (cisd && hasLiqSweep && hasEntryArray) gs += 1;
+
+  const fullConf = hasLiqSweep && hasCisd && hasEntryArray;
+  const grade = fullConf && gs >= 8 ? 'A++' : gs >= 6 ? 'A+' : gs >= 4 ? 'B' : null;
+  if (!grade) return null;
+
+  // Direction
+  const bullScore = (bos_bull?1:0) + (choch_bull?1:0) + (turtleBull?1:0) + (last.c < eq ?1:0) + (cisd==='bull'?1:0);
+  const bearScore = (bos_bear?1:0) + (choch_bear?1:0) + (turtleBear?1:0) + (last.c > eq ?1:0) + (cisd==='bear'?1:0);
+  if (bullScore === bearScore) return null;
+  const dir    = bullScore > bearScore ? 'LONG' : 'SHORT';
+  const isLong = dir === 'LONG';
+
+  // Fib gate
+  const fibPct = swH > swL ? (last.c - swL) / (swH - swL) * 100 : 50;
+  if (isLong  && fibPct > 79) return null;
+  if (!isLong && fibPct < 21) return null;
+
+  // Trade levels
+  const entry   = last.c;
+  const slDist  = Math.max(last.h - last.l, avgRange) * 1.1;
+  const sl      = isLong ? entry - slDist : entry + slDist;
+  const tp1     = isLong ? entry + slDist * 1.5 : entry - slDist * 1.5;
+  const tp2     = isLong ? swH : swL;
+  const tp3     = isLong ? swH + slDist * 2 : swL - slDist * 2;
+  const rr      = slDist > 0 ? Math.abs(tp2 - entry) / slDist : 0;
+
+  const conditions = [];
+  if (inKZ)          conditions.push(`Kill Zone: ${session}`);
+  if (hasLiqSweep)   conditions.push(turtleBull||turtleBear ? 'Turtle Soup sweep' : `${isLong?'SSL':'BSL'} swept`);
+  if (cisd)          conditions.push(`CISD ${cisd==='bull'?'▲':'▼'} H4`);
+  if (choch_bull||choch_bear) conditions.push('CHoCH confirmed');
+  if (hasEntryArray) conditions.push(`FVG array @ ${entry.toFixed(2)}`);
+  conditions.push(`${isLong?'Discount':'Premium'} ${fibPct.toFixed(1)}% fib`);
+  conditions.push(`DOL: ${isLong?'BSL':'SSL'} @ ${tp2.toFixed(2)}`);
+
+  const timeStr = et.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+  return { dir, grade, session, time: timeStr, entry, sl, slDist, tp1, tp2, tp3, rr, conditions, fibPct };
+}
+
+// ── TELEGRAM ──────────────────────────────────────────────────────────────────────
+async function sendTelegram(sig) {
+  const dir   = sig.dir === 'LONG' ? '🟢 LONG' : '🔴 SHORT';
+  const badge = sig.grade === 'A++' ? '🏆 A++' : sig.grade === 'A+' ? '⭐ A+' : '🔵 B';
+  const flag  = sig.session === 'London' ? '🇬🇧' : '🗽';
+
+  const text = [
+    `⚡ *SIGNAL POINTER — XAUUSD*`,
+    `${dir}  ${badge}  ${flag} ${sig.session}`,
+    `🕐 ${sig.time} ET`,
+    ``,
+    `┌─ TRADE LEVELS ───────────`,
+    `│ ENTRY : \`${sig.entry.toFixed(2)}\``,
+    `│ SL    : \`${sig.sl.toFixed(2)}\` (${sig.slDist.toFixed(1)} pts)`,
+    `│ TP1   : \`${sig.tp1.toFixed(2)}\` (~1.5R)`,
+    `│ TP2   : \`${sig.tp2.toFixed(2)}\` (DOL)`,
+    `│ TP3   : \`${sig.tp3.toFixed(2)}\` (5R ext)`,
+    `│ R:R   : ${sig.rr.toFixed(1)}:1`,
+    `└──────────────────────────`,
+    ``,
+    `📋 *Conditions:*`,
+    ...sig.conditions.map(c => `• ${c}`),
+    ``,
+    `_ICT 2022 · Signal Pointer · Auto-alert_`,
+  ].join('\n');
+
+  const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: TG_CHAT_ID, text, parse_mode: 'Markdown', disable_web_page_preview: true }),
+  });
+  const d = await r.json();
+  if (!d.ok) console.error('Telegram error:', d.description);
+  return d.ok;
+}
+
+// ── DEDUP ─────────────────────────────────────────────────────────────────────────
+let lastSignalKey = '';
+let lastSignalTime = 0;
+const SIGNAL_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour cooldown per same signal
+
+function shouldSend(sig) {
+  const key = `${sig.dir}_${sig.grade}_${sig.session}_${Math.round(sig.entry / 10) * 10}`;
+  const now = Date.now();
+  if (key === lastSignalKey && now - lastSignalTime < SIGNAL_COOLDOWN_MS) return false;
+  lastSignalKey  = key;
+  lastSignalTime = now;
+  return true;
+}
+
+// ── WEBSOCKET CONNECTION ──────────────────────────────────────────────────────────
+let ws = null;
+let tickCount = 0;
+let reconnectDelay = 3000;
+
+function connect() {
+  console.log(`[${new Date().toISOString()}] Connecting to TwelveData WebSocket...`);
+
+  ws = new WebSocket(`wss://ws.twelvedata.com/v1/quotes/price?apikey=${TD_KEY}`);
+
+  ws.on('open', () => {
+    console.log('WS connected — subscribing to XAU/USD');
+    reconnectDelay = 3000;
+    ws.send(JSON.stringify({
+      action: 'subscribe',
+      params: { symbols: 'XAU/USD' }
+    }));
+    // Status ping every 30 min
+    setInterval(() => {
+      const et = nowET();
+      const hhmm = et.getHours() * 100 + et.getMinutes();
+      const inKZ = (hhmm >= 200 && hhmm <= 500) || (hhmm >= 830 && hhmm <= 1100);
+      console.log(`[PING] Ticks: ${tickCount} | KZ: ${inKZ} | H4 candles: ${candles['4h'].length} | Last price: ${currentCandle['4h']?.c || 'n/a'}`);
+    }, 30 * 60 * 1000);
+  });
+
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.event === 'price' && msg.symbol === 'XAU/USD' && msg.price) {
+        const price = parseFloat(msg.price);
+        const ts    = msg.timestamp ? msg.timestamp * 1000 : Date.now();
+        processTick(price, ts);
+        tickCount++;
+
+        // Check signal every 50 ticks (reduce CPU)
+        if (tickCount % 50 === 0) {
+          const sig = computeSignal();
+          if (sig && shouldSend(sig)) {
+            console.log(`[SIGNAL] ${sig.dir} ${sig.grade} @ ${sig.entry.toFixed(2)} — sending to Telegram`);
+            sendTelegram(sig).then(ok => {
+              if (ok) console.log('[SIGNAL] Telegram sent ✓');
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Parse error:', e.message);
+    }
+  });
+
+  ws.on('error', (e) => {
+    console.error('WS error:', e.message);
+  });
+
+  ws.on('close', (code) => {
+    console.log(`WS closed (${code}) — reconnecting in ${reconnectDelay / 1000}s`);
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 60000); // exponential backoff, max 1 min
+  });
+}
+
+// ── STARTUP ───────────────────────────────────────────────────────────────────────
+console.log('=================================================');
+console.log(' ICT Gold Terminal — 24/7 Signal Bot');
+console.log(' Pair: XAUUSD | Grades: B / A+ / A++');
+console.log(' Kill Zones: London 02:00-05:00 ET | NY 08:30-11:00 ET');
+console.log('=================================================');
+
+// Seed candles from REST before WS (so engine has data immediately on start)
+async function seedCandles() {
+  for (const [tf, interval] of [['4h','4h'],['1h','1h'],['15m','15min']]) {
+    try {
+      const url = `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=${interval}&outputsize=80&format=JSON&apikey=${TD_KEY}`;
+      const r = await fetch(url);
+      const d = await r.json();
+      if (d.values) {
+        candles[tf] = d.values.map(v => ({
+          t: new Date(v.datetime).getTime(),
+          o: parseFloat(v.open), h: parseFloat(v.high),
+          l: parseFloat(v.low),  c: parseFloat(v.close),
+        })).reverse();
+        console.log(`Seeded ${candles[tf].length} candles for ${tf}`);
+      }
+    } catch (e) { console.error(`Seed error ${tf}:`, e.message); }
+  }
+}
+
+// HTTP server (Railway/Render require a port to stay alive)
+const http = require('http');
+http.createServer((req, res) => {
+  const et    = nowET();
+  const hhmm  = et.getHours() * 100 + et.getMinutes();
+  const inKZ  = (hhmm >= 200 && hhmm <= 500) || (hhmm >= 830 && hhmm <= 1100);
+  const h4len = candles['4h'].length;
+  const price = currentCandle['4h']?.c || 0;
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    status: 'running',
+    wsConnected: ws?.readyState === 1,
+    ticks: tickCount,
+    price: price.toFixed(2),
+    h4Candles: h4len,
+    killZone: inKZ,
+    session: inKZ ? (hhmm < 500 ? 'London' : 'NY') : 'Off-hours',
+    lastSignal: lastSignalKey || 'none',
+    uptime: Math.floor(process.uptime()) + 's',
+  }));
+}).listen(process.env.PORT || 3000, () => {
+  console.log(`Health check: http://localhost:${process.env.PORT || 3000}`);
+});
+
+seedCandles().then(() => connect());
