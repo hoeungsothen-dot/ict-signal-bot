@@ -336,4 +336,19 @@ http.createServer((req, res) => {
   console.log(`Health check: http://localhost:${process.env.PORT || 3000}`);
 });
 
+// ── KEEP-ALIVE SELF-PING (Render free tier spins down after 15min inactivity) ───
+// Pings own health endpoint every 10 minutes to stay awake
+if (process.env.RENDER_EXTERNAL_URL) {
+  const SELF_URL = process.env.RENDER_EXTERNAL_URL;
+  setInterval(async () => {
+    try {
+      await fetch(SELF_URL);
+      console.log(`[PING] Self-ping sent to ${SELF_URL}`);
+    } catch (e) {
+      console.warn('[PING] Self-ping failed:', e.message);
+    }
+  }, 10 * 60 * 1000); // every 10 minutes
+  console.log(`Keep-alive enabled → pinging ${SELF_URL} every 10 min`);
+}
+
 seedCandles().then(() => connect());
