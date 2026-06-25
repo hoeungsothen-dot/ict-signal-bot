@@ -320,6 +320,30 @@ http.createServer((req, res) => {
   const h4len = candles['4h'].length;
   const price = currentCandle['4h']?.c || 0;
 
+    // /test — send a real test signal to Telegram to confirm pipeline
+  if (req.url === '/test') {
+    const livePrice = currentCandle['4h']?.c || 3990;
+    const testSig = {
+      dir: 'LONG', grade: 'A+', session: 'NY', time: '09:15',
+      entry: livePrice, sl: livePrice - 12.5, slDist: 12.5,
+      tp1: livePrice + 18.75, tp2: livePrice + 35, tp3: livePrice + 62.5, rr: 2.8,
+      conditions: [
+        'Kill Zone: NY AM',
+        'SSL swept (Turtle Soup)',
+        'CISD ▲ on H4',
+        'FVG entry array confirmed',
+        `Discount zone (fib 38.2%)`,
+        `DOL: BSL @ ${(livePrice + 35).toFixed(2)}`,
+        '⚠ TEST MESSAGE — confirming bot pipeline',
+      ],
+    };
+    sendTelegram(testSig).then(ok => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ sent: ok, price: livePrice.toFixed(2), message: ok ? 'Check your Telegram group!' : 'Telegram send failed — check TG_TOKEN and TG_CHAT_ID' }));
+    });
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     status: 'running',
