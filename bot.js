@@ -8,22 +8,32 @@
  */
 
 const WebSocket = require('ws');
-const fs = require('fs');
-const TRADE_FILE = '/tmp/ict_active_trade.json';
 
-function saveTrade(trade) {
-  try { fs.writeFileSync(TRADE_FILE, JSON.stringify(trade)); } catch(e) {}
-}
-function loadTrade() {
+// ── CLOUDFLARE D1 PERSISTENCE (trade survives Render restarts) ────────────────────
+const WORKER_URL  = process.env.WORKER_URL  || ''; // e.g. https://ict-mentorship2022-system.workers.dev
+const BOT_KEY     = process.env.TD_KEY ? process.env.TD_KEY.slice(-8) : '';
+
+async function saveTrade(trade) {
+  if (!WORKER_URL) return;
   try {
-    if (fs.existsSync(TRADE_FILE)) {
-      const t = JSON.parse(fs.readFileSync(TRADE_FILE, 'utf8'));
-      if (t && t.entry && !t.slHit && !t.tp3Hit) {
-        console.log(`[RESTORE] Active trade restored: ${t.dir} @ ${t.entry} | SL ${t.sl} | TP1 ${t.tp1}`);
-        return t;
-      }
+    await fetch(`${WORKER_URL}/api/active-trade`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Bot-Key': BOT_KEY },
+      body: trade ? JSON.stringify(trade) : 'null',
+    });
+  } catch(e) { console.warn('[STORE] Save trade failed:', e.message); }
+}
+
+async function loadTrade() {
+  if (!WORKER_URL) return null;
+  try {
+    const r = await fetch(`${WORKER_URL}/api/active-trade`);
+    const t = await r.json();
+    if (t && t.entry && !t.slHit && !t.tp3Hit) {
+      console.log(`[RESTORE] Trade restored from D1: ${t.dir} @ ${t.entry} | TP1 ${t.tp1} | TP1Hit:${t.tp1Hit}`);
+      return t;
     }
-  } catch(e) {}
+  } catch(e) { console.warn('[STORE] Load trade failed:', e.message); }
   return null;
 }
 
@@ -554,7 +564,8 @@ if (process.env.RENDER_EXTERNAL_URL) {
   console.log(`Keep-alive enabled → pinging ${SELF_URL} every 10 min`);
 }
 
-// Restore active trade from file if bot restarted mid-trade
-activeTrade = loadTrade();
-
-seedCandles().then(() => connect());
+// Restore active trade from D1 if bot restarted mid-trade
+loadTrade().then(t => {
+  if (t) activeTrade = t;
+  seedCandles().then(() => connect());
+});
