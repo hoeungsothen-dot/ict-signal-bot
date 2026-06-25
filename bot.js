@@ -8,6 +8,24 @@
  */
 
 const WebSocket = require('ws');
+const fs = require('fs');
+const TRADE_FILE = '/tmp/ict_active_trade.json';
+
+function saveTrade(trade) {
+  try { fs.writeFileSync(TRADE_FILE, JSON.stringify(trade)); } catch(e) {}
+}
+function loadTrade() {
+  try {
+    if (fs.existsSync(TRADE_FILE)) {
+      const t = JSON.parse(fs.readFileSync(TRADE_FILE, 'utf8'));
+      if (t && t.entry && !t.slHit && !t.tp3Hit) {
+        console.log(`[RESTORE] Active trade restored: ${t.dir} @ ${t.entry} | SL ${t.sl} | TP1 ${t.tp1}`);
+        return t;
+      }
+    }
+  } catch(e) {}
+  return null;
+}
 
 // ── CONFIG FROM ENV ──────────────────────────────────────────────────────────────
 const TD_KEY     = process.env.TD_KEY     || '';
@@ -274,6 +292,7 @@ function setActiveTrade(sig) {
     entryTime: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York', hour12: false }) + ' ET',
   };
   console.log(`[TRADE] Active trade set: ${sig.dir} @ ${sig.entry.toFixed(2)} | SL ${sig.sl.toFixed(2)} | TP1 ${sig.tp1.toFixed(2)} | TP2 ${sig.tp2.toFixed(2)}`);
+  saveTrade(activeTrade);
 }
 
 async function sendTradeUpdate(type, price) {
@@ -328,7 +347,9 @@ function checkTradeLevels(price) {
   // SL hit
   if (!t.slHit && (isLong ? price <= t.sl : price >= t.sl)) {
     t.slHit = true;
-    activeTrade = null; // close trade
+    saveTrade({...t, slHit: true});
+    activeTrade = null;
+    saveTrade(null);
     sendTradeUpdate('SL', price);
     console.log(`[TRADE] SL hit @ ${price.toFixed(2)}`);
     return;
@@ -336,19 +357,22 @@ function checkTradeLevels(price) {
   // TP1
   if (!t.tp1Hit && (isLong ? price >= t.tp1 : price <= t.tp1)) {
     t.tp1Hit = true;
+    saveTrade(activeTrade);
     sendTradeUpdate('TP1', price);
     console.log(`[TRADE] TP1 hit @ ${price.toFixed(2)}`);
   }
   // TP2
   if (t.tp1Hit && !t.tp2Hit && (isLong ? price >= t.tp2 : price <= t.tp2)) {
     t.tp2Hit = true;
+    saveTrade(activeTrade);
     sendTradeUpdate('TP2', price);
     console.log(`[TRADE] TP2 hit @ ${price.toFixed(2)}`);
   }
   // TP3
   if (t.tp2Hit && !t.tp3Hit && (isLong ? price >= t.tp3 : price <= t.tp3)) {
     t.tp3Hit = true;
-    activeTrade = null; // fully closed
+    saveTrade(null);
+    activeTrade = null;
     sendTradeUpdate('TP3', price);
     console.log(`[TRADE] TP3 hit @ ${price.toFixed(2)}`);
   }
@@ -529,5 +553,8 @@ if (process.env.RENDER_EXTERNAL_URL) {
   }, 10 * 60 * 1000); // every 10 minutes
   console.log(`Keep-alive enabled → pinging ${SELF_URL} every 10 min`);
 }
+
+// Restore active trade from file if bot restarted mid-trade
+activeTrade = loadTrade();
 
 seedCandles().then(() => connect());
