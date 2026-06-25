@@ -223,6 +223,108 @@ function shouldSend(sig) {
   return true;
 }
 
+// ── ACTIVE TRADE MONITOR ──────────────────────────────────────────────────────────
+// Tracks open signal and fires Telegram alerts when price hits TP1/TP2/TP3/SL
+let activeTrade = null; // { dir, entry, sl, tp1, tp2, tp3, grade, session, tp1Hit, tp2Hit, tp3Hit, slHit, entryTime }
+
+function setActiveTrade(sig) {
+  activeTrade = {
+    dir:       sig.dir,
+    entry:     sig.entry,
+    sl:        sig.sl,
+    tp1:       sig.tp1,
+    tp2:       sig.tp2,
+    tp3:       sig.tp3,
+    slDist:    sig.slDist,
+    grade:     sig.grade,
+    session:   sig.session,
+    tp1Hit:    false,
+    tp2Hit:    false,
+    tp3Hit:    false,
+    slHit:     false,
+    entryTime: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York', hour12: false }) + ' ET',
+  };
+  console.log(`[TRADE] Active trade set: ${sig.dir} @ ${sig.entry.toFixed(2)} | SL ${sig.sl.toFixed(2)} | TP1 ${sig.tp1.toFixed(2)} | TP2 ${sig.tp2.toFixed(2)}`);
+}
+
+async function sendTradeUpdate(type, price) {
+  const t = activeTrade;
+  if (!t) return;
+
+  const dir     = t.dir === 'LONG' ? '🟢 LONG' : '🔴 SHORT';
+  const pnlPts  = t.dir === 'LONG' ? price - t.entry : t.entry - price;
+  const pnlR    = (pnlPts / t.slDist).toFixed(1);
+  const pnlSign = pnlPts >= 0 ? '+' : '';
+
+  let emoji, headline, note;
+  if (type === 'TP1') { emoji = '🎯'; headline = 'TP1 HIT — Move SL to breakeven'; note = `Secured ~1.5R — SL → ${t.entry.toFixed(2)}`; }
+  if (type === 'TP2') { emoji = '💰'; headline = 'TP2 HIT — DOL Reached!';          note = `Strong target hit — consider closing or trailing`; }
+  if (type === 'TP3') { emoji = '🏆'; headline = 'TP3 HIT — Full Extension!';        note = `Maximum target reached — close all remaining`; }
+  if (type === 'SL')  { emoji = '🛑'; headline = 'STOP LOSS HIT';                    note = `Loss contained. Wait for next KZ setup.`; }
+
+  const text = [
+    `${emoji} *${headline}*`,
+    ``,
+    `${dir}  ${t.grade}  @ Entry \`${t.entry.toFixed(2)}\``,
+    `📍 Price now: \`${price.toFixed(2)}\``,
+    `📊 P&L: ${pnlSign}${pnlPts.toFixed(1)} pts  (${pnlSign}${pnlR}R)`,
+    ``,
+    `┌─ LEVELS ─────────────────`,
+    `│ Entry : \`${t.entry.toFixed(2)}\``,
+    `│ SL    : \`${t.sl.toFixed(2)}\`  ${type === 'SL' ? '← HIT ✗' : ''}`,
+    `│ TP1   : \`${t.tp1.toFixed(2)}\`  ${t.tp1Hit ? '✓' : type === 'TP1' ? '← HIT ✓' : ''}`,
+    `│ TP2   : \`${t.tp2.toFixed(2)}\`  ${t.tp2Hit ? '✓' : type === 'TP2' ? '← HIT ✓' : ''}`,
+    `│ TP3   : \`${t.tp3.toFixed(2)}\`  ${t.tp3Hit ? '✓' : type === 'TP3' ? '← HIT ✓' : ''}`,
+    `└──────────────────────────`,
+    ``,
+    `💡 ${note}`,
+    `_Signal Pointer · ICT 2022_`,
+  ].join('\n');
+
+  const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: TG_CHAT_ID, text, parse_mode: 'Markdown', disable_web_page_preview: true }),
+  });
+  const d = await r.json();
+  if (d.ok) console.log(`[TRADE] ${type} alert sent ✓`);
+  else console.error(`[TRADE] Telegram error:`, d.description);
+}
+
+function checkTradeLevels(price) {
+  const t = activeTrade;
+  if (!t || t.slHit || t.tp3Hit) return;
+  const isLong = t.dir === 'LONG';
+
+  // SL hit
+  if (!t.slHit && (isLong ? price <= t.sl : price >= t.sl)) {
+    t.slHit = true;
+    activeTrade = null; // close trade
+    sendTradeUpdate('SL', price);
+    console.log(`[TRADE] SL hit @ ${price.toFixed(2)}`);
+    return;
+  }
+  // TP1
+  if (!t.tp1Hit && (isLong ? price >= t.tp1 : price <= t.tp1)) {
+    t.tp1Hit = true;
+    sendTradeUpdate('TP1', price);
+    console.log(`[TRADE] TP1 hit @ ${price.toFixed(2)}`);
+  }
+  // TP2
+  if (t.tp1Hit && !t.tp2Hit && (isLong ? price >= t.tp2 : price <= t.tp2)) {
+    t.tp2Hit = true;
+    sendTradeUpdate('TP2', price);
+    console.log(`[TRADE] TP2 hit @ ${price.toFixed(2)}`);
+  }
+  // TP3
+  if (t.tp2Hit && !t.tp3Hit && (isLong ? price >= t.tp3 : price <= t.tp3)) {
+    t.tp3Hit = true;
+    activeTrade = null; // fully closed
+    sendTradeUpdate('TP3', price);
+    console.log(`[TRADE] TP3 hit @ ${price.toFixed(2)}`);
+  }
+}
+
 // ── WEBSOCKET CONNECTION ──────────────────────────────────────────────────────────
 let ws = null;
 let tickCount = 0;
@@ -258,13 +360,19 @@ function connect() {
         processTick(price, ts);
         tickCount++;
 
-        // Check signal every 50 ticks (reduce CPU)
+        // Check active trade levels on EVERY tick (real-time TP/SL monitoring)
+        checkTradeLevels(price);
+
+        // Check for new signal every 50 ticks
         if (tickCount % 50 === 0) {
           const sig = computeSignal();
           if (sig && shouldSend(sig)) {
             console.log(`[SIGNAL] ${sig.dir} ${sig.grade} @ ${sig.entry.toFixed(2)} — sending to Telegram`);
             sendTelegram(sig).then(ok => {
-              if (ok) console.log('[SIGNAL] Telegram sent ✓');
+              if (ok) {
+                console.log('[SIGNAL] Telegram sent ✓');
+                setActiveTrade(sig); // start monitoring TP/SL
+              }
             });
           }
         }
@@ -354,6 +462,13 @@ http.createServer((req, res) => {
     killZone: inKZ,
     session: inKZ ? (hhmm < 500 ? 'London' : 'NY') : 'Off-hours',
     lastSignal: lastSignalKey || 'none',
+    activeTrade: activeTrade ? {
+      dir: activeTrade.dir, grade: activeTrade.grade,
+      entry: activeTrade.entry.toFixed(2), sl: activeTrade.sl.toFixed(2),
+      tp1: activeTrade.tp1.toFixed(2), tp1Hit: activeTrade.tp1Hit,
+      tp2: activeTrade.tp2.toFixed(2), tp2Hit: activeTrade.tp2Hit,
+      tp3: activeTrade.tp3.toFixed(2), tp3Hit: activeTrade.tp3Hit,
+    } : null,
     uptime: Math.floor(process.uptime()) + 's',
   }));
 }).listen(process.env.PORT || 3000, () => {
