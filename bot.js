@@ -528,7 +528,37 @@ http.createServer((req, res) => {
   const h4len = candles['4h'].length;
   const price = currentCandle['4h']?.c || 0;
 
-    // /test — send a real test signal to Telegram to confirm pipeline
+  // /debug — show engine state right now
+  if (req.url === '/debug') {
+    const h4d = [...candles['4h'], currentCandle['4h']].filter(Boolean);
+    const h1d = [...candles['1h'], currentCandle['1h']].filter(Boolean);
+    const swHd = h4d.length>=20 ? Math.max(...h4d.slice(-20).map(c=>c.h)) : 0;
+    const swLd = h4d.length>=20 ? Math.min(...h4d.slice(-20).map(c=>c.l)) : 0;
+    const fibD = swHd>swLd && price>0 ? ((price-swLd)/(swHd-swLd)*100).toFixed(1)+'%' : 'n/a';
+    const avgRng = h4d.length>=10 ? (h4d.slice(-10).reduce((s,c)=>s+(c.h-c.l),0)/10).toFixed(2) : 'n/a';
+    const coolLeft = lastSignalTime>0 ? Math.max(0,Math.round((SIGNAL_COOLDOWN_MS-(Date.now()-lastSignalTime))/60000)) : 0;
+    res.writeHead(200,{'Content-Type':'application/json',...CORS});
+    res.end(JSON.stringify({
+      time_ET: et.toLocaleTimeString('en-US',{timeZone:'America/New_York',hour12:false}),
+      hhmm, inKillZone: inKZ,
+      price: price.toFixed(2),
+      h4Candles: h4d.length, h1Candles: h1d.length,
+      swingHigh: swHd.toFixed(2), swingLow: swLd.toFixed(2),
+      fibPosition: fibD,
+      avgH4Range: avgRng,
+      ticks: tickCount,
+      lastSignalKey: lastSignalKey||'none',
+      cooldownMinLeft: coolLeft,
+      diagnosis: !inKZ ? '⛔ Outside Kill Zone — engine idle (London 02-05 ET, NY 08:30-11 ET)'
+        : h4d.length<20 ? '⛔ Not enough H4 candles yet (need 20+)'
+        : h1d.length<10 ? '⛔ Not enough H1 candles yet (need 10+)'
+        : coolLeft>0 ? '⏳ Cooldown active — '+coolLeft+'min left'
+        : '✅ Engine running — signal fires when sweep+FVG+CISD align in KZ',
+    },null,2));
+    return;
+  }
+
+  // /test — send a real test signal to Telegram to confirm pipeline
   if (req.url === '/test') {
     const livePrice = currentCandle['4h']?.c || 3990;
     const testSig = {
