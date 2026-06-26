@@ -283,19 +283,15 @@ function shouldSend(sig) {
   }
   // A+/A++ always pass quality gate — they require fullConf by definition
 
-  // ── Cooldown: same direction within 90 min
+  // ── Cooldown: same direction within 90 min (applies to ALL grades)
   const dirKey = `${sig.dir}_${sig.session}`;
   if (dirKey === lastSignalKey && now - lastSignalTime < SIGNAL_COOLDOWN_MS) {
-    // Allow upgrade: if last signal was B and new is A+ or A++, send anyway
-    if (!(sig.grade === 'A++' || sig.grade === 'A+')) {
-      console.log(`[SKIP] ${sig.dir} @ ${sig.entry.toFixed(2)} — cooldown active (${Math.round((SIGNAL_COOLDOWN_MS-(now-lastSignalTime))/60000)}min left)`);
-      return false;
-    }
+    console.log(`[SKIP] ${sig.dir} ${sig.grade} @ ${sig.entry.toFixed(2)} — cooldown active (${Math.round((SIGNAL_COOLDOWN_MS-(now-lastSignalTime))/60000)}min left)`);
+    return false;
   }
 
-  // ── Zone dedup: entry within 40pts of last signal (price just drifting)
-  // A++ always fires regardless of zone proximity
-  if (sig.grade !== 'A++' && lastSignalEntry > 0 && Math.abs(sig.entry - lastSignalEntry) < SIGNAL_ZONE_PTS && dirKey === lastSignalKey) {
+  // ── Zone dedup: entry within 40pts of last signal (applies to ALL grades)
+  if (lastSignalEntry > 0 && Math.abs(sig.entry - lastSignalEntry) < SIGNAL_ZONE_PTS && dirKey === lastSignalKey) {
     console.log(`[SKIP] ${sig.dir} ${sig.grade} @ ${sig.entry.toFixed(2)} — within ${SIGNAL_ZONE_PTS}pts of last signal @ ${lastSignalEntry.toFixed(2)}`);
     return false;
   }
