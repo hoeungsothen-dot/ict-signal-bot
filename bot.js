@@ -103,78 +103,98 @@ function computeSignal() {
   const session = inLDN ? 'London' : 'NY';
 
   const n    = h4.length;
-  const last = h4[n - 1];
-  const prev = h4.slice(-20);
+  const last = h4[n - 1];   // current live H4 candle
+  const recent = h4.slice(-6); // last 6 H4 candles for sweep/CISD lookback
 
-  // Structure
-  const swH = Math.max(...prev.map(c => c.h));
-  const swL = Math.min(...prev.map(c => c.l));
+  // ── Swing structure (20-candle range) ───────────────────────────────────
+  const swH = Math.max(...h4.slice(-20).map(c => c.h));
+  const swL = Math.min(...h4.slice(-20).map(c => c.l));
   const eq  = (swH + swL) / 2;
 
-  const prev3H = Math.max(...h4.slice(-4, -1).map(c => c.h));
-  const prev3L = Math.min(...h4.slice(-4, -1).map(c => c.l));
+  // ── BOS / CHoCH (look back 4 candles) ───────────────────────────────────
+  const prev3H = Math.max(...h4.slice(-5, -1).map(c => c.h));
+  const prev3L = Math.min(...h4.slice(-5, -1).map(c => c.l));
   const bos_bull   = last.c > prev3H;
   const bos_bear   = last.c < prev3L;
-  const choch_bull = last.l < prev3L && last.c > prev3L;
-  const choch_bear = last.h > prev3H && last.c < prev3H;
+  // CHoCH: any of last 3 candles broke structure then closed back
+  const choch_bull = recent.some(c => c.l < prev3L && c.c > prev3L);
+  const choch_bear = recent.some(c => c.h > prev3H && c.c < prev3H);
 
-  // Liquidity sweep
-  const ph = h4.slice(-6, -1).map(c => c.h);
-  const pl = h4.slice(-6, -1).map(c => c.l);
-  const turtleBull = last.l < Math.min(...pl) && last.c > Math.min(...pl);
-  const turtleBear = last.h > Math.max(...ph) && last.c < Math.max(...ph);
-  const bslSwept   = last.h > swH * 0.999 && last.c < swH;
-  const sslSwept   = last.l < swL * 1.001 && last.c > swL;
-  const hasLiqSweep = turtleBull || turtleBear || bslSwept || sslSwept;
+  // ── Liquidity sweep (look back 6 H4 candles — not just last one) ─────────
+  const avgRange = h4.slice(-10).reduce((s, c) => s + (c.h - c.l), 0) / 10;
+  const ph6 = h4.slice(-8, -1).map(c => c.h);
+  const pl6 = h4.slice(-8, -1).map(c => c.l);
+  const maxH = Math.max(...ph6);
+  const minL = Math.min(...pl6);
 
-  // FVG
+  let sweepType = null;
+  for (const c of recent) {
+    if (c.l < minL && c.c > minL) { sweepType = 'SSL swept (Turtle Soup)'; break; }
+    if (c.h > maxH && c.c < maxH) { sweepType = 'BSL swept (Turtle Soup)'; break; }
+    if (c.h > swH * 0.999 && c.c < swH) { sweepType = 'BSL swept'; break; }
+    if (c.l < swL * 1.001 && c.c > swL) { sweepType = 'SSL swept'; break; }
+  }
+  const hasLiqSweep = !!sweepType;
+
+  // ── FVG detection — look for any unmitigated FVG near current price ──────
   const fvgs_bull = [], fvgs_bear = [];
   for (let i = 1; i < n - 1; i++) {
     if (h4[i-1] && h4[i+1]) {
-      if (h4[i-1].h < h4[i+1].l) fvgs_bull.push({ top: h4[i+1].l, bot: h4[i-1].h });
-      if (h4[i-1].l > h4[i+1].h) fvgs_bear.push({ top: h4[i-1].l, bot: h4[i+1].h });
+      if (h4[i-1].h < h4[i+1].l) fvgs_bull.push({ top: h4[i+1].l, bot: h4[i-1].h, mid: (h4[i+1].l + h4[i-1].h) / 2 });
+      if (h4[i-1].l > h4[i+1].h) fvgs_bear.push({ top: h4[i-1].l, bot: h4[i+1].h, mid: (h4[i-1].l + h4[i+1].h) / 2 });
     }
   }
-  const atFvgBull = fvgs_bull.some(f => last.c >= f.bot * 0.998 && last.c <= f.top * 1.002);
-  const atFvgBear = fvgs_bear.some(f => last.c >= f.bot * 0.998 && last.c <= f.top * 1.002);
-  const hasEntryArray = atFvgBull || atFvgBear;
+  // Price within 0.5% of any FVG (wider tolerance)
+  const px = last.c;
+  const nearFvgBull = fvgs_bull.filter(f => px >= f.bot * 0.995 && px <= f.top * 1.005);
+  const nearFvgBear = fvgs_bear.filter(f => px >= f.bot * 0.995 && px <= f.top * 1.005);
+  const hasEntryArray = nearFvgBull.length > 0 || nearFvgBear.length > 0;
+  const fvgLabel = nearFvgBull.length > 0
+    ? `H4 Bull FVG @ ${nearFvgBull[0].bot.toFixed(2)}–${nearFvgBull[0].top.toFixed(2)}`
+    : nearFvgBear.length > 0
+    ? `H4 Bear FVG @ ${nearFvgBear[0].bot.toFixed(2)}–${nearFvgBear[0].top.toFixed(2)}`
+    : null;
 
-  // CISD
-  const avgRange = h4.slice(-10).reduce((s, c) => s + (c.h - c.l), 0) / 10;
-  const cisd = (last.h - last.l) > avgRange * 1.5 ? (last.c > last.o ? 'bull' : 'bear') : null;
+  // ── CISD — look back 6 H4 candles for displacement candle ───────────────
+  let cisdType = null;
+  for (const c of recent) {
+    if ((c.h - c.l) > avgRange * 1.4) {
+      cisdType = c.c > c.o ? 'bull' : 'bear';
+      break;
+    }
+  }
+  // H1 MSS — look back 6 H1 candles
+  const h1Recent = h1.slice(-6);
+  const h1PrevH = Math.max(...h1.slice(-8, -2).map(c => c.h));
+  const h1PrevL = Math.min(...h1.slice(-8, -2).map(c => c.l));
+  const h1MSS = h1Recent.some(c => c.c > h1PrevH || c.c < h1PrevL);
+  const hasCisd = !!(cisdType || h1MSS);
 
-  // H1 MSS
-  const h1n = h1.length;
-  const h1last = h1[h1n - 1];
-  const h1HasMSS = h1n > 3 && h1last && (
-    h1last.c > Math.max(...h1.slice(-4, -1).map(c => c.h)) ||
-    h1last.c < Math.min(...h1.slice(-4, -1).map(c => c.l))
-  );
-  const hasCisd = !!(cisd || h1HasMSS);
-
-  // Score
+  // ── Score ────────────────────────────────────────────────────────────────
   let gs = 0;
-  gs += 2; // KZ confirmed above
+  gs += 2; // KZ active
   if (bos_bull || bos_bear)     gs += 1;
   if (choch_bull || choch_bear) gs += 1;
   if (hasLiqSweep)              gs += 2;
   if (hasCisd)                  gs += 1;
   if (hasEntryArray)            gs += 1;
-  if (cisd && hasLiqSweep && hasEntryArray) gs += 1;
+  if (hasLiqSweep && hasCisd && hasEntryArray) gs += 1; // full confluence bonus
 
   const fullConf = hasLiqSweep && hasCisd && hasEntryArray;
   const grade = fullConf && gs >= 8 ? 'A++' : gs >= 6 ? 'A+' : gs >= 4 ? 'B' : null;
   if (!grade) return null;
 
-  // Direction
-  const bullScore = (bos_bull?1:0) + (choch_bull?1:0) + (turtleBull?1:0) + (last.c < eq ?1:0) + (cisd==='bull'?1:0);
-  const bearScore = (bos_bear?1:0) + (choch_bear?1:0) + (turtleBear?1:0) + (last.c > eq ?1:0) + (cisd==='bear'?1:0);
+  // ── Direction ────────────────────────────────────────────────────────────
+  const isDiscount = px < eq;
+  const isPremium  = px > eq;
+  const bullScore = (bos_bull?1:0) + (choch_bull?1:0) + (sweepType?.includes('SSL')?1:0) + (isDiscount?1:0) + (cisdType==='bull'?1:0);
+  const bearScore = (bos_bear?1:0) + (choch_bear?1:0) + (sweepType?.includes('BSL')?1:0) + (isPremium?1:0)  + (cisdType==='bear'?1:0);
   if (bullScore === bearScore) return null;
   const dir    = bullScore > bearScore ? 'LONG' : 'SHORT';
   const isLong = dir === 'LONG';
 
-  // Fib gate
-  const fibPct = swH > swL ? (last.c - swL) / (swH - swL) * 100 : 50;
+  // ── Fib gate (ICT OTE 21%–79%) ──────────────────────────────────────────
+  const fibPct = swH > swL ? (px - swL) / (swH - swL) * 100 : 50;
   if (isLong  && fibPct > 79) return null;
   if (!isLong && fibPct < 21) return null;
 
@@ -188,11 +208,12 @@ function computeSignal() {
   const rr      = slDist > 0 ? Math.abs(tp2 - entry) / slDist : 0;
 
   const conditions = [];
-  if (inKZ)          conditions.push(`Kill Zone: ${session}`);
-  if (hasLiqSweep)   conditions.push(turtleBull||turtleBear ? 'Turtle Soup sweep' : `${isLong?'SSL':'BSL'} swept`);
-  if (cisd)          conditions.push(`CISD ${cisd==='bull'?'▲':'▼'} H4`);
-  if (choch_bull||choch_bear) conditions.push('CHoCH confirmed');
-  if (hasEntryArray) conditions.push(`FVG array @ ${entry.toFixed(2)}`);
+  conditions.push(`Kill Zone: ${session}`);
+  if (sweepType)              conditions.push(sweepType);
+  if (cisdType)               conditions.push(`CISD ${cisdType==='bull'?'▲':'▼'} on H4`);
+  if (h1MSS)                  conditions.push('H1 MSS confirmed');
+  if (choch_bull||choch_bear) conditions.push(`CHoCH ${choch_bull?'▲':'▼'} confirmed`);
+  if (fvgLabel)               conditions.push(fvgLabel);
   conditions.push(`${isLong?'Discount':'Premium'} ${fibPct.toFixed(1)}% fib`);
   conditions.push(`DOL: ${isLong?'BSL':'SSL'} @ ${tp2.toFixed(2)}`);
 
