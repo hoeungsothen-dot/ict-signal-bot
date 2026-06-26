@@ -1188,11 +1188,12 @@ function detectExecutionOnBars(anals, px) {
   // H4 A++, A+, or B = full signal. H1 B+ also valid for LTF execution
   const h4Grade = h4.grade;
   const h1Grade = h1.grade;
-  const grade = (h4Grade === 'A++' || h4Grade === 'A+' || h4Grade === 'B') ? h4Grade
-               : (h1Grade === 'A++' || h1Grade === 'A+' || h1Grade === 'B') ? h1Grade
+  // A++ ONLY — A+ and B are skipped at engine level
+  const grade = (h4Grade === 'A++') ? 'A++'
+               : (h1Grade === 'A++') ? 'A++'
                : null;
   if (!grade || grade === 'NEWS') return null;
-  const htfConfirmed = h4Grade === 'A++' || h4Grade === 'A+' || h4Grade === 'B';
+  const htfConfirmed = h4Grade === 'A++';
   if (!px) return null;
 
   // ── 2. Directional bias (must be clear) ───────────────────────────────
@@ -1449,7 +1450,7 @@ function computeSignal() {
 // ── TELEGRAM ──────────────────────────────────────────────────────────────────────
 async function sendTelegram(sig) {
   const dir   = sig.dir === 'LONG' ? '🟢 LONG' : '🔴 SHORT';
-  const badge = sig.grade === 'A++' ? '🏆 A++' : sig.grade === 'A+' ? '⭐ A+' : '🔵 B';
+  const badge = '🏆 A++';
   const flag  = sig.session === 'London' ? '🇬🇧' : '🗽';
 
   const etNow = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
@@ -1484,44 +1485,64 @@ async function sendTelegram(sig) {
 }
 
 // ── DEDUP ─────────────────────────────────────────────────────────────────────────
-let lastSignalKey = '';
-let lastSignalTime = 0;
+// ── SIGNAL FILTER CONFIG ──────────────────────────────────────────────────────────
+// Backtest data (web app engine, Dec 2025 – Jun 2026):
+//   A++: 80% WR, PF 17.94, +33.87R  ← TRADE
+//   A+:  38.5% WR, PF 4.84           ← SKIP (loses in 4/6 months)
+//   B:   losing                       ← SKIP
+const ALLOWED_GRADES    = ['A++'];          // Only A++ signals sent to Telegram
+const MAX_PER_SESSION   = 1;               // Max 1 signal per kill zone session
+const SIGNAL_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4-hour cooldown (one per session)
+const SIGNAL_ZONE_PTS   = 40;             // Ignore if entry within 40pts of last
+
+// Per-session counter: resets each new session window
+// Key: YYYY-MM-DD_SESSION  e.g. "2026-06-26_NY"
+const sessionCount = new Map();
+
+function getSessionKey(sig) {
+  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const date = et.toISOString().slice(0, 10);
+  const sess = (sig.session || '').replace('New York', 'NY');
+  return `${date}_${sess}`;
+}
+
+let lastSignalKey   = '';
+let lastSignalTime  = 0;
 let lastSignalEntry = 0;
-const SIGNAL_COOLDOWN_MS = 90 * 60 * 1000;  // 90 min cooldown per signal direction
-const SIGNAL_ZONE_PTS   = 40;               // ignore new signal if entry within 40pts of last
 
 function shouldSend(sig) {
   const now = Date.now();
 
-  // ── Quality gate: A++/A+ bypass (they require fullConf which already includes sweep+CISD+FVG)
-  // B grade must have at least one of: sweep, FVG, CISD, CHoCH
-  if (sig.grade === 'B') {
-    const hasQuality = sig.conditions.some(c =>
-      c.includes('sweep') || c.includes('swept') ||
-      c.includes('FVG')   || c.includes('CISD')  ||
-      c.includes('CHoCH') || c.includes('Turtle')
-    );
-    if (!hasQuality) {
-      console.log(`[SKIP] B grade @ ${sig.entry.toFixed(2)} — only KZ+fib+DOL, no sweep/FVG/CISD`);
-      return false;
-    }
+  // ── Grade gate: A++ only ──────────────────────────────────────────────────────
+  if (!ALLOWED_GRADES.includes(sig.grade)) {
+    console.log(`[SKIP] Grade ${sig.grade} @ ${sig.entry.toFixed(2)} — only A++ allowed`);
+    return false;
   }
-  // A+/A++ always pass quality gate — they require fullConf by definition
 
-  // ── Cooldown: same direction within 90 min (applies to ALL grades)
-  const sess = (sig.session||'').replace('New York','NY');
+  // ── Per-session cap: max 1 signal per session ─────────────────────────────────
+  const sessKey = getSessionKey(sig);
+  const sessCount = sessionCount.get(sessKey) || 0;
+  if (sessCount >= MAX_PER_SESSION) {
+    console.log(`[SKIP] ${sig.dir} ${sig.grade} @ ${sig.entry.toFixed(2)} — session cap reached (${sessCount}/${MAX_PER_SESSION} for ${sessKey})`);
+    return false;
+  }
+
+  // ── Cooldown: same direction within 4h ───────────────────────────────────────
+  const sess  = (sig.session || '').replace('New York', 'NY');
   const dirKey = `${sig.dir}_${sess}`;
   if (dirKey === lastSignalKey && now - lastSignalTime < SIGNAL_COOLDOWN_MS) {
     console.log(`[SKIP] ${sig.dir} ${sig.grade} @ ${sig.entry.toFixed(2)} — cooldown active (${Math.round((SIGNAL_COOLDOWN_MS-(now-lastSignalTime))/60000)}min left)`);
     return false;
   }
 
-  // ── Zone dedup: entry within 40pts of last signal (applies to ALL grades)
+  // ── Zone dedup: entry within 40pts of last ────────────────────────────────────
   if (lastSignalEntry > 0 && Math.abs(sig.entry - lastSignalEntry) < SIGNAL_ZONE_PTS && dirKey === lastSignalKey) {
     console.log(`[SKIP] ${sig.dir} ${sig.grade} @ ${sig.entry.toFixed(2)} — within ${SIGNAL_ZONE_PTS}pts of last signal @ ${lastSignalEntry.toFixed(2)}`);
     return false;
   }
 
+  // ── All gates passed — update state ──────────────────────────────────────────
+  sessionCount.set(sessKey, sessCount + 1);
   lastSignalKey   = dirKey;
   lastSignalTime  = now;
   lastSignalEntry = sig.entry;
@@ -1730,6 +1751,16 @@ async function seedCandles() {
   }
 }
 
+// ── FILTER STATUS EXPORT (for dashboard) ────────────────────────────────────────
+function getFilterConfig() {
+  return {
+    allowedGrades:  ALLOWED_GRADES,
+    maxPerSession:  MAX_PER_SESSION,
+    cooldownMin:    SIGNAL_COOLDOWN_MS / 60000,
+    sessionCounts:  Object.fromEntries(sessionCount),
+  };
+}
+
 // HTTP server (Railway/Render require a port to stay alive)
 const http = require('http');
 const CORS = {
@@ -1825,6 +1856,7 @@ http.createServer((req, res) => {
     killZone: inKZ,
     session: inKZ ? (hhmm < 500 ? 'London' : 'NY') : 'Off-hours',
     lastSignal: lastSignalKey || 'none',
+    filterConfig: getFilterConfig(),
     activeTrade: activeTrade ? {
       dir: activeTrade.dir, grade: activeTrade.grade,
       entry: activeTrade.entry.toFixed(2), sl: activeTrade.sl.toFixed(2),
