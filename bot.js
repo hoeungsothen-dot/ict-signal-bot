@@ -247,16 +247,20 @@ const SIGNAL_ZONE_PTS   = 40;               // ignore new signal if entry within
 function shouldSend(sig) {
   const now = Date.now();
 
-  // ── Quality gate: must have at least sweep OR FVG OR CISD beyond just KZ+fib+DOL
-  const hasQuality = sig.conditions.some(c =>
-    c.includes('sweep') || c.includes('swept') ||
-    c.includes('FVG')   || c.includes('CISD')  ||
-    c.includes('CHoCH')
-  );
-  if (!hasQuality) {
-    console.log(`[SKIP] Grade ${sig.grade} @ ${sig.entry.toFixed(2)} — no sweep/FVG/CISD, only KZ+fib+DOL`);
-    return false;
+  // ── Quality gate: A++/A+ bypass (they require fullConf which already includes sweep+CISD+FVG)
+  // B grade must have at least one of: sweep, FVG, CISD, CHoCH
+  if (sig.grade === 'B') {
+    const hasQuality = sig.conditions.some(c =>
+      c.includes('sweep') || c.includes('swept') ||
+      c.includes('FVG')   || c.includes('CISD')  ||
+      c.includes('CHoCH') || c.includes('Turtle')
+    );
+    if (!hasQuality) {
+      console.log(`[SKIP] B grade @ ${sig.entry.toFixed(2)} — only KZ+fib+DOL, no sweep/FVG/CISD`);
+      return false;
+    }
   }
+  // A+/A++ always pass quality gate — they require fullConf by definition
 
   // ── Cooldown: same direction within 90 min
   const dirKey = `${sig.dir}_${sig.session}`;
@@ -269,8 +273,9 @@ function shouldSend(sig) {
   }
 
   // ── Zone dedup: entry within 40pts of last signal (price just drifting)
-  if (lastSignalEntry > 0 && Math.abs(sig.entry - lastSignalEntry) < SIGNAL_ZONE_PTS && dirKey === lastSignalKey) {
-    console.log(`[SKIP] ${sig.dir} @ ${sig.entry.toFixed(2)} — too close to last signal @ ${lastSignalEntry.toFixed(2)} (${Math.abs(sig.entry-lastSignalEntry).toFixed(1)}pts)`);
+  // A++ always fires regardless of zone proximity
+  if (sig.grade !== 'A++' && lastSignalEntry > 0 && Math.abs(sig.entry - lastSignalEntry) < SIGNAL_ZONE_PTS && dirKey === lastSignalKey) {
+    console.log(`[SKIP] ${sig.dir} ${sig.grade} @ ${sig.entry.toFixed(2)} — within ${SIGNAL_ZONE_PTS}pts of last signal @ ${lastSignalEntry.toFixed(2)}`);
     return false;
   }
 
@@ -520,8 +525,19 @@ http.createServer((req, res) => {
       ],
     };
     sendTelegram(testSig).then(ok => {
+      if (ok) setActiveTrade(testSig); // monitor TP/SL on test signal too
       res.writeHead(200, { 'Content-Type': 'application/json', ...CORS });
-      res.end(JSON.stringify({ sent: ok, price: livePrice.toFixed(2), message: ok ? 'Check your Telegram group!' : 'Telegram send failed — check TG_TOKEN and TG_CHAT_ID' }));
+      res.end(JSON.stringify({
+        sent: ok,
+        price: livePrice.toFixed(2),
+        entry: testSig.entry.toFixed(2),
+        sl: testSig.sl.toFixed(2),
+        tp1: testSig.tp1.toFixed(2),
+        tp2: testSig.tp2.toFixed(2),
+        tp3: testSig.tp3.toFixed(2),
+        monitoring: ok ? 'TP/SL monitoring active — watching live price' : 'Send failed',
+        message: ok ? 'Check your Telegram — TP/SL alerts will fire automatically' : 'Failed — check TG_TOKEN and TG_CHAT_ID'
+      }));
     });
     return;
   }
