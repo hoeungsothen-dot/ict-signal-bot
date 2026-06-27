@@ -1199,26 +1199,14 @@ function detectExecutionOnBars(anals, px) {
   const htfConfirmed = true;
   if (!px) return null;
 
-  // ── 1b. Session gate — hard hhmm check on H1 bar to prevent H4 session bleed ──
-  // H4 bars opened in NY (20:00 ET) close at midnight → h4.session='New York' bleeds into Asia
-  // Use H1 last-candle timestamp for precise ET hhmm check
-  const h1LastTs = h1.last?.t;
-  let barHhmm = -1;
-  if (h1LastTs) {
-    try {
-      const d = new Date(typeof h1LastTs==='number'&&h1LastTs<1e12 ? h1LastTs*1000 : h1LastTs);
-      const s = d.toLocaleString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hour12:false});
-      barHhmm = parseInt(s.replace(':',''));
-    } catch(_) {}
-  }
-  // Valid KZ windows: London 02:00-05:00 ET, NY 08:30-11:00 ET
-  // Also allow: NY afternoon overlap 13:00-16:00 ET (Silver Bullet / PM session)
-  // Reject: midnight & early morning 00:00-01:59 ET (Asia dead zone)
-  const inLdnKZ = barHhmm >= 200 && barHhmm <= 500;
-  const inNyKZ  = barHhmm >= 830 && barHhmm <= 1100;
-  const inPmKZ  = barHhmm >= 1300 && barHhmm <= 1600;
-  const inValidKZ = barHhmm < 0 || inLdnKZ || inNyKZ || inPmKZ; // <0 = no ts available, allow
-  if (!inValidKZ) return null; // midnight/Asia dead zone — reject
+  // ── 1b. Session gate — live bot uses current ET time (always real-time) ──
+  // In live bot, new Date() = current bar close time. Use it for precise KZ check.
+  const nowET = new Date().toLocaleString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hour12:false});
+  const barHhmm = parseInt(nowET.replace(':',''));
+  const inLdnKZ = barHhmm >= 200  && barHhmm <= 500;   // London KZ: 02:00–05:00 ET
+  const inNyKZ  = barHhmm >= 830  && barHhmm <= 1100;  // NY KZ: 08:30–11:00 ET
+  const inPmKZ  = barHhmm >= 1300 && barHhmm <= 1600;  // PM Silver Bullet: 13:00–16:00 ET
+  if (!inLdnKZ && !inNyKZ && !inPmKZ) return null;     // reject Asia/midnight
 
   // ── 2. Directional bias (must be clear) ───────────────────────────────
   const bias = (h4.bias || 0) * 0.4 + (h1.bias || 0) * 0.35 + (m15.bias || 0) * 0.25;
@@ -1338,17 +1326,27 @@ function detectExecutionOnBars(anals, px) {
   const MAX_RISK_PTS = 20; // H1 IFVG zones 3-19pts; loss #4 (17.79) caught by session gate
   if (slp < MIN_RISK_PTS || slp > MAX_RISK_PTS) return null; // risk gate
 
-  // ── 5b. Execution confluence gate — structural confirmation required ──
-  // Tier 1 (strongest): H4 sweep or H4 CISD — clear displacement confirmation
-  // Tier 2 (valid):     H1 sweep or H4 CHoCH or H4 BOS — structural shift present  
-  // Tier 3 (weakest):   H1 CISD alone — NOT sufficient (caused loss #4)
-  // Gate: must have Tier 1 OR Tier 2 confirm
-  const h4HasSweep = !!(h4.bslSwept || h4.sslSwept || h4.turtleBull || h4.turtleBear);
-  const h4HasCisd  = !!(h4.cisd && ((isLong && h4.cisd.type === 'bull') || (!isLong && h4.cisd.type === 'bear')));
-  const h4HasChoch = !!(isLong ? h4.choch_bull : h4.choch_bear);
-  const h4HasBos   = !!(isLong ? h4.bos_bull   : h4.bos_bear);
-  const execConfluence = h4HasSweep || h4HasCisd || h1HasSweep || h4HasChoch || h4HasBos;
-  if (!execConfluence) return null; // pure KZ+IFVG+DOL only — insufficient
+  // ── 5b. ICT 2022 Directional Confluence Gate ───────────────────────────
+  // SHORT: KZ + BSL swept(H4/H1) + Bearish BOS(H4/H1) + Bearish CISD(H4/H1) + DOL below
+  // LONG:  KZ + SSL swept(H4/H1) + Bullish BOS(H4/H1)  + Bullish CISD(H4/H1) + DOL above
+  // Each leg accepts H4 OR H1 — increases signal frequency while maintaining structure
+
+  // SHORT conditions
+  const shortBslSwept = !!(h4.bslSwept || h4.turtleBear || h1.bslSwept || h1.turtleBear);
+  const shortBos      = !!(h4.bos_bear || h1.bos_bear || h4.choch_bear || h1.choch_bear);
+  const shortCisd     = !!((h4.cisd?.type==='bear') || (h1.cisd?.type==='bear') || h4.choch_bear || h1.choch_bear);
+  const shortDol      = !!(h4.dol?.dir==='DOWN' || h1.dol?.dir==='DOWN');
+  const shortConf     = shortBslSwept && shortBos && shortCisd && shortDol;
+
+  // LONG conditions
+  const longSslSwept  = !!(h4.sslSwept || h4.turtleBull || h1.sslSwept || h1.turtleBull);
+  const longBos       = !!(h4.bos_bull || h1.bos_bull || h4.choch_bull || h1.choch_bull);
+  const longCisd      = !!((h4.cisd?.type==='bull') || (h1.cisd?.type==='bull') || h4.choch_bull || h1.choch_bull);
+  const longDol       = !!(h4.dol?.dir==='UP' || h1.dol?.dir==='UP');
+  const longConf      = longSslSwept && longBos && longCisd && longDol;
+
+  if (!isLong && !shortConf) return null;
+  if (isLong  && !longConf)  return null;
 
   // ── 6. TP = Draw on Liquidity — MUST be in the same direction as the trade ──
   // For LONG: dolTarget must be ABOVE entry. For SHORT: must be BELOW entry.
@@ -1379,25 +1377,33 @@ function detectExecutionOnBars(anals, px) {
 
   // ── 7. Build conditions list ───────────────────────────────────────────
   const conditions = [];
-  if (h4.inKZ || h4.session === 'London' || h4.session === 'New York') conditions.push('KZ');
-  // H4 structural sweep (primary)
-  if (isLong  && h4.turtleBull) conditions.push('Turtle Soup ↑ H4');
-  else if (!isLong && h4.turtleBear) conditions.push('Turtle Soup ↓ H4');
-  if (isLong  && h4.sslSwept) conditions.push('SSL swept H4');
-  else if (!isLong && h4.bslSwept) conditions.push('BSL swept H4');
-  // H1 sweep supplement (execution-level confirmation)
-  if (isLong  && h1.sslSwept && !h4.sslSwept) conditions.push('SSL swept H1');
-  else if (!isLong && h1.bslSwept && !h4.bslSwept) conditions.push('BSL swept H1');
-  // CHoCH
-  if (isLong  && h4.choch_bull) conditions.push('CHoCH ↑ H4');
-  else if (!isLong && h4.choch_bear) conditions.push('CHoCH ↓ H4');
-  if (isLong  && h4.bos_bull  && !h4.choch_bull)  conditions.push('BOS ↑ H4');
-  else if (!isLong && h4.bos_bear && !h4.choch_bear) conditions.push('BOS ↓ H4');
-  // CISD — H4 primary, H1 supplement
-  if (h4.cisd && ((isLong && h4.cisd.type === 'bull') || (!isLong && h4.cisd.type === 'bear')))
-    conditions.push('CISD ' + h4.cisd.type + ' H4');
-  else if (h1.cisd && ((isLong && h1.cisd.type === 'bull') || (!isLong && h1.cisd.type === 'bear')))
-    conditions.push('CISD ' + h1.cisd.type + ' H1');
+  // KZ label
+  const kzLabel = inLdnKZ ? 'KZ London' : inNyKZ ? 'KZ NY' : 'KZ PM';
+  conditions.push(kzLabel);
+  // Sweep (BSL for SHORT, SSL for LONG) — show H4/H1 source
+  if (!isLong) {
+    if (h4.bslSwept || h4.turtleBear)      conditions.push('BSL swept H4');
+    else if (h1.bslSwept || h1.turtleBear) conditions.push('BSL swept H1');
+  } else {
+    if (h4.sslSwept || h4.turtleBull)      conditions.push('SSL swept H4');
+    else if (h1.sslSwept || h1.turtleBull) conditions.push('SSL swept H1');
+  }
+  // BOS/CHoCH — directional, show H4/H1 source
+  if (!isLong) {
+    if (h4.bos_bear || h4.choch_bear) conditions.push('BOS↓ H4');
+    if (h1.bos_bear || h1.choch_bear) conditions.push('BOS↓ H1');
+  } else {
+    if (h4.bos_bull || h4.choch_bull) conditions.push('BOS↑ H4');
+    if (h1.bos_bull || h1.choch_bull) conditions.push('BOS↑ H1');
+  }
+  // CISD — directional, show H4/H1 source
+  if (!isLong) {
+    if (h4.cisd?.type === 'bear') conditions.push('CISD bear H4');
+    if (h1.cisd?.type === 'bear') conditions.push('CISD bear H1');
+  } else {
+    if (h4.cisd?.type === 'bull') conditions.push('CISD bull H4');
+    if (h1.cisd?.type === 'bull') conditions.push('CISD bull H1');
+  }
   if (entryZone) conditions.push(entryZone.type + ' ' + entryZone.tf + (atZone ? ' ✓' : ' (pending)'));
   if (dolTarget) conditions.push('DOL ' + (h4DolValid ? 'H4' : 'H1') + ' → ' + dolTarget.toFixed(2));
   else if (poolTarget) conditions.push('Pool → ' + poolTarget.toFixed(2));
