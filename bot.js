@@ -1188,12 +1188,10 @@ function detectExecutionOnBars(anals, px) {
   // H4 A++, A+, or B = full signal. H1 B+ also valid for LTF execution
   const h4Grade = h4.grade;
   const h1Grade = h1.grade;
-  // A++ ONLY — A+ and B are skipped at engine level
-  const grade = (h4Grade === 'A++') ? 'A++'
-               : (h1Grade === 'A++') ? 'A++'
-               : null;
+  // A++ ONLY — must be confirmed on H4; H1-only A++ is insufficient (causes 37% WR)
+  const grade = (h4Grade === 'A++') ? 'A++' : null;
   if (!grade || grade === 'NEWS') return null;
-  const htfConfirmed = h4Grade === 'A++';
+  const htfConfirmed = true; // always true now since grade requires H4 A++
   if (!px) return null;
 
   // ── 2. Directional bias (must be clear) ───────────────────────────────
@@ -1308,6 +1306,11 @@ function detectExecutionOnBars(anals, px) {
   }
 
   if (slp < 0.01) return null; // zero-width zone guard
+  // Risk pts gate: Gold SL must be 3–40 pts. H4 FVG zones average 64 pts → reject.
+  // H1 IFVG zones average 9 pts → pass. This aligns bot with web app standard (avg 9.7 pts).
+  const MIN_RISK_PTS = 3;
+  const MAX_RISK_PTS = 40;
+  if (slp < MIN_RISK_PTS || slp > MAX_RISK_PTS) return null; // risk gate
 
   // ── 6. TP = Draw on Liquidity — MUST be in the same direction as the trade ──
   // For LONG: dolTarget must be ABOVE entry. For SHORT: must be BELOW entry.
