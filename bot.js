@@ -1056,7 +1056,7 @@ function analyzeICT(candles,tf=''){
   const bslD=dedup(bsl),sslD=dedup(ssl);
   const eqh=bslD.length?bslD.at(-1):null,eql=sslD.length?sslD.at(-1):null;
   // Confirmed sweeps: wick beyond EQH/EQL then close back inside (last 6 candles)
-  const recentC=candles.slice(-6);
+  const recentC=candles.slice(-12); // extended 6→12 bars: sweep valid for ~3 trading days
   const bslSwept=eqh?recentC.some(c=>c.h>eqh.price&&c.c<eqh.price):false;
   const sslSwept=eql?recentC.some(c=>c.l<eql.price&&c.c>eql.price):false;
   // Rejection Block
@@ -1077,7 +1077,7 @@ function analyzeICT(candles,tf=''){
   }
   // CISD
   let cisd=null;
-  for(let i=Math.max(0,n-5);i<n;i++){
+  for(let i=Math.max(0,n-10);i<n;i++){ // extended 5→10 bars: CISD valid for ~2.5 days
     const c=candles[i],range=c.h-c.l;if(range<0.0001)continue;
     const body=Math.abs(c.c-c.o)/range,uw=(c.h-Math.max(c.o,c.c))/range,lw=(Math.min(c.o,c.c)-c.l)/range;
     const avg=candles.slice(Math.max(0,i-5),i).reduce((s,x)=>s+Math.abs(x.c-x.o),0)/5;
@@ -1207,10 +1207,10 @@ function detectExecutionOnBars(anals, px) {
   // D1 gate removed — H4 structure is sufficient; D1 gate was blocking valid OTE entries
   const h4Fib = parseFloat(h4.fibPct) || 50;
   if (isLong) {
-    if (h4Fib > 79)  return null;  // price above OTE zone top — no longs
+    if (h4Fib > 85)  return null;  // price above OTE zone top — no longs (widened 79→85)
     if (h4Fib < 0)   return null;  // price below range entirely — wait
   } else {
-    if (h4Fib < 21)  return null;  // price below OTE zone bottom — no shorts
+    if (h4Fib < 15)  return null;  // price below OTE zone bottom — no shorts (widened 21→15)
     if (h4Fib > 100) return null;  // price above range entirely — wait
   }
 
