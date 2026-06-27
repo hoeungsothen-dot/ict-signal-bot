@@ -1199,6 +1199,11 @@ function detectExecutionOnBars(anals, px) {
   const htfConfirmed = true;
   if (!px) return null;
 
+  // ── 1b. Session gate — use H1 session (precise) to validate KZ window ──
+  // H4 bars straddle KZ boundaries — H1 is more accurate for session timing
+  const activeSession = h1.session || h4.session || '';
+  if (activeSession !== 'London' && activeSession !== 'New York') return null;
+
   // ── 2. Directional bias (must be clear) ───────────────────────────────
   const bias = (h4.bias || 0) * 0.4 + (h1.bias || 0) * 0.35 + (m15.bias || 0) * 0.25;
   if (Math.abs(bias) < 0.1) return null;
@@ -1314,8 +1319,16 @@ function detectExecutionOnBars(anals, px) {
   // Risk pts gate: Gold SL must be 3–40 pts. H4 FVG zones average 64 pts → reject.
   // H1 IFVG zones average 9 pts → pass. This aligns bot with web app standard (avg 9.7 pts).
   const MIN_RISK_PTS = 3;
-  const MAX_RISK_PTS = 40;
+  const MAX_RISK_PTS = 12; // tightened: H1 IFVG zones avg 9.7pts; loss #4 had rp=17.79
   if (slp < MIN_RISK_PTS || slp > MAX_RISK_PTS) return null; // risk gate
+
+  // ── 5b. Execution confluence gate — must have structural confirmation ──
+  // Require at least: H4 sweep OR H1 sweep OR H4 CISD
+  // Rejects: KZ+IFVG+DOL alone (loss #1) and H1-CISD-only (loss #4)
+  const h4HasSweep = !!(h4.bslSwept || h4.sslSwept || h4.turtleBull || h4.turtleBear);
+  const execConfluence = h4HasSweep || h1HasSweep ||
+    !!(h4.cisd && ((isLong && h4.cisd.type === 'bull') || (!isLong && h4.cisd.type === 'bear')));
+  if (!execConfluence) return null; // no structural sweep or H4 CISD — skip
 
   // ── 6. TP = Draw on Liquidity — MUST be in the same direction as the trade ──
   // For LONG: dolTarget must be ABOVE entry. For SHORT: must be BELOW entry.
