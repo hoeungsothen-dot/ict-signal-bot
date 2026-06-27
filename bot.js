@@ -1326,24 +1326,29 @@ function detectExecutionOnBars(anals, px) {
   const MAX_RISK_PTS = 20; // H1 IFVG zones 3-19pts; loss #4 (17.79) caught by session gate
   if (slp < MIN_RISK_PTS || slp > MAX_RISK_PTS) return null; // risk gate
 
-  // ── 5b. ICT 2022 Directional Confluence Gate ───────────────────────────
-  // SHORT: KZ + BSL swept(H4/H1) + Bearish BOS(H4/H1) + Bearish CISD(H4/H1) + DOL below
-  // LONG:  KZ + SSL swept(H4/H1) + Bullish BOS(H4/H1)  + Bullish CISD(H4/H1) + DOL above
-  // Each leg accepts H4 OR H1 — increases signal frequency while maintaining structure
+  // ── 5b. ICT 2022 Confluence Scoring Gate ───────────────────────────────
+  // Score each condition: sweep, BOS/CHoCH, CISD, DOL — each H4 OR H1 counts
+  // Rule: score >= 2 AND at least one H4-level condition (prevents pure H1-only)
+  // This matches your probability checklist: 3+ items from the list fire signal
 
-  // SHORT conditions
-  const shortBslSwept = !!(h4.bslSwept || h4.turtleBear || h1.bslSwept || h1.turtleBear);
-  const shortBos      = !!(h4.bos_bear || h1.bos_bear || h4.choch_bear || h1.choch_bear);
-  const shortCisd     = !!((h4.cisd?.type==='bear') || (h1.cisd?.type==='bear') || h4.choch_bear || h1.choch_bear);
-  const shortDol      = !!(h4.dol?.dir==='DOWN' || h1.dol?.dir==='DOWN');
-  const shortConf     = shortBslSwept && shortBos && shortCisd && shortDol;
+  // SHORT scoring
+  const shortSweep = !!(h4.bslSwept || h4.turtleBear || h1.bslSwept || h1.turtleBear);
+  const shortBos   = !!(h4.bos_bear  || h4.choch_bear || h1.bos_bear  || h1.choch_bear);
+  const shortCisd  = !!((h4.cisd?.type==='bear') || (h1.cisd?.type==='bear') || h4.choch_bear || h1.choch_bear);
+  const shortDol   = !!(h4.dol?.dir==='DOWN' || h1.dol?.dir==='DOWN');
+  const shortScore = (shortSweep?1:0) + (shortBos?1:0) + (shortCisd?1:0) + (shortDol?1:0);
+  // H4 structural anchor (at least one H4 condition required — no pure H1-only signals)
+  const shortH4Anchor = !!(h4.bslSwept||h4.turtleBear||h4.bos_bear||h4.choch_bear||(h4.cisd?.type==='bear'));
+  const shortConf  = shortScore >= 2 && shortH4Anchor;
 
-  // LONG conditions
-  const longSslSwept  = !!(h4.sslSwept || h4.turtleBull || h1.sslSwept || h1.turtleBull);
-  const longBos       = !!(h4.bos_bull || h1.bos_bull || h4.choch_bull || h1.choch_bull);
-  const longCisd      = !!((h4.cisd?.type==='bull') || (h1.cisd?.type==='bull') || h4.choch_bull || h1.choch_bull);
-  const longDol       = !!(h4.dol?.dir==='UP' || h1.dol?.dir==='UP');
-  const longConf      = longSslSwept && longBos && longCisd && longDol;
+  // LONG scoring
+  const longSweep  = !!(h4.sslSwept  || h4.turtleBull || h1.sslSwept  || h1.turtleBull);
+  const longBos    = !!(h4.bos_bull   || h4.choch_bull  || h1.bos_bull   || h1.choch_bull);
+  const longCisd   = !!((h4.cisd?.type==='bull') || (h1.cisd?.type==='bull') || h4.choch_bull || h1.choch_bull);
+  const longDol    = !!(h4.dol?.dir==='UP' || h1.dol?.dir==='UP');
+  const longScore  = (longSweep?1:0) + (longBos?1:0) + (longCisd?1:0) + (longDol?1:0);
+  const longH4Anchor = !!(h4.sslSwept||h4.turtleBull||h4.bos_bull||h4.choch_bull||(h4.cisd?.type==='bull'));
+  const longConf   = longScore >= 2 && longH4Anchor;
 
   if (!isLong && !shortConf) return null;
   if (isLong  && !longConf)  return null;
