@@ -1199,10 +1199,12 @@ function detectExecutionOnBars(anals, px) {
   const htfConfirmed = true;
   if (!px) return null;
 
-  // ── 1b. Session gate — use H1 session (precise) to validate KZ window ──
-  // H4 bars straddle KZ boundaries — H1 is more accurate for session timing
+  // ── 1b. Session gate — reject pure Asia sessions only ──
+  // H4 inKZ_ already verified in analyzeICT. We additionally reject Asia-only.
+  // Keep: London, New York, Lunch overlap (valid ICT Silver Bullet windows)
+  // Reject: Asia only (no structural validity for Gold intraday ICT)
   const activeSession = h1.session || h4.session || '';
-  if (activeSession !== 'London' && activeSession !== 'New York') return null;
+  if (activeSession === 'Asia') return null;
 
   // ── 2. Directional bias (must be clear) ───────────────────────────────
   const bias = (h4.bias || 0) * 0.4 + (h1.bias || 0) * 0.35 + (m15.bias || 0) * 0.25;
@@ -1319,16 +1321,20 @@ function detectExecutionOnBars(anals, px) {
   // Risk pts gate: Gold SL must be 3–40 pts. H4 FVG zones average 64 pts → reject.
   // H1 IFVG zones average 9 pts → pass. This aligns bot with web app standard (avg 9.7 pts).
   const MIN_RISK_PTS = 3;
-  const MAX_RISK_PTS = 12; // tightened: H1 IFVG zones avg 9.7pts; loss #4 had rp=17.79
+  const MAX_RISK_PTS = 20; // H1 IFVG zones 3-19pts; loss #4 (17.79) caught by session gate
   if (slp < MIN_RISK_PTS || slp > MAX_RISK_PTS) return null; // risk gate
 
-  // ── 5b. Execution confluence gate — must have structural confirmation ──
-  // Require at least: H4 sweep OR H1 sweep OR H4 CISD
-  // Rejects: KZ+IFVG+DOL alone (loss #1) and H1-CISD-only (loss #4)
+  // ── 5b. Execution confluence gate — structural confirmation required ──
+  // Tier 1 (strongest): H4 sweep or H4 CISD — clear displacement confirmation
+  // Tier 2 (valid):     H1 sweep or H4 CHoCH or H4 BOS — structural shift present  
+  // Tier 3 (weakest):   H1 CISD alone — NOT sufficient (caused loss #4)
+  // Gate: must have Tier 1 OR Tier 2 confirm
   const h4HasSweep = !!(h4.bslSwept || h4.sslSwept || h4.turtleBull || h4.turtleBear);
-  const execConfluence = h4HasSweep || h1HasSweep ||
-    !!(h4.cisd && ((isLong && h4.cisd.type === 'bull') || (!isLong && h4.cisd.type === 'bear')));
-  if (!execConfluence) return null; // no structural sweep or H4 CISD — skip
+  const h4HasCisd  = !!(h4.cisd && ((isLong && h4.cisd.type === 'bull') || (!isLong && h4.cisd.type === 'bear')));
+  const h4HasChoch = !!(isLong ? h4.choch_bull : h4.choch_bear);
+  const h4HasBos   = !!(isLong ? h4.bos_bull   : h4.bos_bear);
+  const execConfluence = h4HasSweep || h4HasCisd || h1HasSweep || h4HasChoch || h4HasBos;
+  if (!execConfluence) return null; // pure KZ+IFVG+DOL only — insufficient
 
   // ── 6. TP = Draw on Liquidity — MUST be in the same direction as the trade ──
   // For LONG: dolTarget must be ABOVE entry. For SHORT: must be BELOW entry.
@@ -1369,8 +1375,10 @@ function detectExecutionOnBars(anals, px) {
   if (isLong  && h1.sslSwept && !h4.sslSwept) conditions.push('SSL swept H1');
   else if (!isLong && h1.bslSwept && !h4.bslSwept) conditions.push('BSL swept H1');
   // CHoCH
-  if (isLong  && h4.choch_bull) conditions.push('CHoCH ↑');
-  else if (!isLong && h4.choch_bear) conditions.push('CHoCH ↓');
+  if (isLong  && h4.choch_bull) conditions.push('CHoCH ↑ H4');
+  else if (!isLong && h4.choch_bear) conditions.push('CHoCH ↓ H4');
+  if (isLong  && h4.bos_bull  && !h4.choch_bull)  conditions.push('BOS ↑ H4');
+  else if (!isLong && h4.bos_bear && !h4.choch_bear) conditions.push('BOS ↓ H4');
   // CISD — H4 primary, H1 supplement
   if (h4.cisd && ((isLong && h4.cisd.type === 'bull') || (!isLong && h4.cisd.type === 'bear')))
     conditions.push('CISD ' + h4.cisd.type + ' H4');
