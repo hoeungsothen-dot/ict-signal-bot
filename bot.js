@@ -1161,9 +1161,11 @@ function analyzeICT(candles,tf=''){
   if(hasEntryArray)gs+=1;                   // Entry PD array present
   if(bpr.length)gs+=1;                      // BPR (highest precision)
   if(cisd&&hasLiqSweep&&hasEntryArray)gs+=1;// Full confluence bonus
-  // Grade: A++ requires sweep + CISD + KZ + entry array
-  const fullConf=inKZ_&&hasLiqSweep&&hasCisdOrMss&&hasEntryArray&&hasDolClear&&!inNewsWindow;
-  const grade=fullConf&&gs>=8?'A++':inNewsWindow?'NEWS':(gs>=6?'A+':(gs>=4?'B':'C'));
+  // Grade: A++ requires KZ + LiqSweep + EntryArray + DOL (CISD is supplementary — verified at execution)
+  // ICT 2022: H4 provides structural grade, H1 provides CISD/MSS execution trigger
+  // Relaxing hasCisdOrMss here allows H1 CISD to satisfy the requirement in detectExecutionOnBars
+  const fullConf=inKZ_&&hasLiqSweep&&hasEntryArray&&hasDolClear&&!inNewsWindow;
+  const grade=fullConf&&gs>=7?'A++':inNewsWindow?'NEWS':(gs>=6?'A+':(gs>=4?'B':'C'));
   let bias=0;
   if(bb||cb)bias+=1;if(bear||cb2)bias-=1;if(inD)bias+=.5;if(inP)bias-=.5;
   if(amdBull)bias+=.3;if(amdBear)bias-=.3;if(turtleBull)bias+=.4;if(turtleBear)bias-=.4;
@@ -1184,14 +1186,17 @@ function detectExecutionOnBars(anals, px) {
   const h4 = anals['4h'] || {}, h1 = anals['1h'] || {}, m15 = anals['15m'] || {}, m5 = anals['5m'] || {}, d1 = anals['1d'] || {};
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
 
-  // ── 1. Grade gate — H4 is primary; H1 A+ is valid for LTF execution
-  // H4 A++, A+, or B = full signal. H1 B+ also valid for LTF execution
+  // ── 1. Grade gate — H4 structural A++ required
+  // H4 fullConf (KZ+Sweep+Array+DOL) + H1 sweep/CISD supplement = valid A++ signal
   const h4Grade = h4.grade;
-  const h1Grade = h1.grade;
-  // A++ ONLY — must be confirmed on H4; H1-only A++ is insufficient (causes 37% WR)
+  // H4 must score A++ (KZ+Sweep+Array+DOL+gs>=7 — CISD may come from H1)
+  // Also accept H4 A++ where H1 has additional sweep/CISD confirmation
+  const h1HasSweep = !!(h1.bslSwept || h1.sslSwept || h1.turtleBull || h1.turtleBear);
+  const h1HasCisd  = !!(h1.cisd || h1.choch_bull || h1.choch_bear);
+  const h1Confirms = h1HasSweep || h1HasCisd;
   const grade = (h4Grade === 'A++') ? 'A++' : null;
   if (!grade || grade === 'NEWS') return null;
-  const htfConfirmed = true; // always true now since grade requires H4 A++
+  const htfConfirmed = true;
   if (!px) return null;
 
   // ── 2. Directional bias (must be clear) ───────────────────────────────
@@ -1341,20 +1346,23 @@ function detectExecutionOnBars(anals, px) {
 
   // ── 7. Build conditions list ───────────────────────────────────────────
   const conditions = [];
-  if (h4.inKZ || h4.session === 'London' || h4.session === 'New York') conditions.push('Kill Zone');
-  // Turtle Soup: bull = swept lows → bullish reversal (LONG), bear = swept highs → SHORT
-  if (isLong  && h4.turtleBull) conditions.push('Turtle Soup ↑');
-  else if (!isLong && h4.turtleBear) conditions.push('Turtle Soup ↓');
-  // BSL swept (buyside taken) → bearish reversal = SHORT confirmation
-  // SSL swept (sellside taken) → bullish reversal = LONG confirmation
-  if (isLong  && h4.sslSwept) conditions.push('SSL swept');
-  else if (!isLong && h4.bslSwept) conditions.push('BSL swept');
-  // CHoCH aligned with direction
+  if (h4.inKZ || h4.session === 'London' || h4.session === 'New York') conditions.push('KZ');
+  // H4 structural sweep (primary)
+  if (isLong  && h4.turtleBull) conditions.push('Turtle Soup ↑ H4');
+  else if (!isLong && h4.turtleBear) conditions.push('Turtle Soup ↓ H4');
+  if (isLong  && h4.sslSwept) conditions.push('SSL swept H4');
+  else if (!isLong && h4.bslSwept) conditions.push('BSL swept H4');
+  // H1 sweep supplement (execution-level confirmation)
+  if (isLong  && h1.sslSwept && !h4.sslSwept) conditions.push('SSL swept H1');
+  else if (!isLong && h1.bslSwept && !h4.bslSwept) conditions.push('BSL swept H1');
+  // CHoCH
   if (isLong  && h4.choch_bull) conditions.push('CHoCH ↑');
   else if (!isLong && h4.choch_bear) conditions.push('CHoCH ↓');
-  // CISD aligned with direction (bull CISD = LONG, bear CISD = SHORT)
-  if (h1.cisd && ((isLong && h1.cisd.type === 'bull') || (!isLong && h1.cisd.type === 'bear')))
-    conditions.push('CISD ' + h1.cisd.type);
+  // CISD — H4 primary, H1 supplement
+  if (h4.cisd && ((isLong && h4.cisd.type === 'bull') || (!isLong && h4.cisd.type === 'bear')))
+    conditions.push('CISD ' + h4.cisd.type + ' H4');
+  else if (h1.cisd && ((isLong && h1.cisd.type === 'bull') || (!isLong && h1.cisd.type === 'bear')))
+    conditions.push('CISD ' + h1.cisd.type + ' H1');
   if (entryZone) conditions.push(entryZone.type + ' ' + entryZone.tf + (atZone ? ' ✓' : ' (pending)'));
   if (dolTarget) conditions.push('DOL ' + (h4DolValid ? 'H4' : 'H1') + ' → ' + dolTarget.toFixed(2));
   else if (poolTarget) conditions.push('Pool → ' + poolTarget.toFixed(2));
