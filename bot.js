@@ -1326,29 +1326,40 @@ function detectExecutionOnBars(anals, px) {
   const MAX_RISK_PTS = 20; // H1 IFVG zones 3-19pts; loss #4 (17.79) caught by session gate
   if (slp < MIN_RISK_PTS || slp > MAX_RISK_PTS) return null; // risk gate
 
-  // ── 5b. ICT 2022 Confluence Scoring Gate ───────────────────────────────
-  // Score each condition: sweep, BOS/CHoCH, CISD, DOL — each H4 OR H1 counts
-  // Rule: score >= 2 AND at least one H4-level condition (prevents pure H1-only)
-  // This matches your probability checklist: 3+ items from the list fire signal
+  // ── 5b. ICT 2022 Confluence Gate — KZ(1) + score>=2 from checklist ───────
+  // Your rule: KZ = 1st confluence. Need 2 MORE from the list.
+  // Each TF (H4, H1) counts separately → maximum precision, more signals.
+  //
+  // SHORT checklist (each item = 1 point):
+  //   sweep_h4, sweep_h1, bos_h4, bos_h1, cisd_h4, cisd_h1, dol
+  // LONG checklist (symmetric):
+  //   sweep_h4, sweep_h1, bos_h4, bos_h1, cisd_h4, cisd_h1, dol
+  //
+  // Gate: KZ (always in context) + checklist score >= 3 (= KZ + 2 others)
+  // Loss pattern (BOS_H4 + DOL only = score 2) is blocked.
+  // Win pattern  (BOS_H4 + BOS_H1 + DOL = score 3) passes.
 
-  // SHORT scoring
-  const shortSweep = !!(h4.bslSwept || h4.turtleBear || h1.bslSwept || h1.turtleBear);
-  const shortBos   = !!(h4.bos_bear  || h4.choch_bear || h1.bos_bear  || h1.choch_bear);
-  const shortCisd  = !!((h4.cisd?.type==='bear') || (h1.cisd?.type==='bear') || h4.choch_bear || h1.choch_bear);
-  const shortDol   = !!(h4.dol?.dir==='DOWN' || h1.dol?.dir==='DOWN');
-  const shortScore = (shortSweep?1:0) + (shortBos?1:0) + (shortCisd?1:0) + (shortDol?1:0);
-  // H4 structural anchor (at least one H4 condition required — no pure H1-only signals)
-  const shortH4Anchor = !!(h4.bslSwept||h4.turtleBear||h4.bos_bear||h4.choch_bear||(h4.cisd?.type==='bear'));
-  const shortConf  = shortScore >= 2 && shortH4Anchor;
+  // SHORT: each condition on each TF counts as 1 point
+  const s_sweepH4 = !!(h4.bslSwept || h4.turtleBear)       ? 1 : 0;
+  const s_sweepH1 = !!(h1.bslSwept || h1.turtleBear)       ? 1 : 0;
+  const s_bosH4   = !!(h4.bos_bear || h4.choch_bear)       ? 1 : 0;
+  const s_bosH1   = !!(h1.bos_bear || h1.choch_bear)       ? 1 : 0;
+  const s_cisdH4  = !!(h4.cisd?.type==='bear' || h4.choch_bear) ? 1 : 0;
+  const s_cisdH1  = !!(h1.cisd?.type==='bear' || h1.choch_bear) ? 1 : 0;
+  const s_dol     = !!(h4.dol?.dir==='DOWN'   || h1.dol?.dir==='DOWN') ? 1 : 0;
+  const shortScore = s_sweepH4+s_sweepH1+s_bosH4+s_bosH1+s_cisdH4+s_cisdH1+s_dol;
+  const shortConf  = shortScore >= 3; // KZ(1) + 2 others from checklist
 
-  // LONG scoring
-  const longSweep  = !!(h4.sslSwept  || h4.turtleBull || h1.sslSwept  || h1.turtleBull);
-  const longBos    = !!(h4.bos_bull   || h4.choch_bull  || h1.bos_bull   || h1.choch_bull);
-  const longCisd   = !!((h4.cisd?.type==='bull') || (h1.cisd?.type==='bull') || h4.choch_bull || h1.choch_bull);
-  const longDol    = !!(h4.dol?.dir==='UP' || h1.dol?.dir==='UP');
-  const longScore  = (longSweep?1:0) + (longBos?1:0) + (longCisd?1:0) + (longDol?1:0);
-  const longH4Anchor = !!(h4.sslSwept||h4.turtleBull||h4.bos_bull||h4.choch_bull||(h4.cisd?.type==='bull'));
-  const longConf   = longScore >= 2 && longH4Anchor;
+  // LONG: symmetric
+  const l_sweepH4 = !!(h4.sslSwept  || h4.turtleBull)      ? 1 : 0;
+  const l_sweepH1 = !!(h1.sslSwept  || h1.turtleBull)      ? 1 : 0;
+  const l_bosH4   = !!(h4.bos_bull  || h4.choch_bull)       ? 1 : 0;
+  const l_bosH1   = !!(h1.bos_bull  || h1.choch_bull)       ? 1 : 0;
+  const l_cisdH4  = !!(h4.cisd?.type==='bull' || h4.choch_bull) ? 1 : 0;
+  const l_cisdH1  = !!(h1.cisd?.type==='bull' || h1.choch_bull) ? 1 : 0;
+  const l_dol     = !!(h4.dol?.dir==='UP'     || h1.dol?.dir==='UP')   ? 1 : 0;
+  const longScore  = l_sweepH4+l_sweepH1+l_bosH4+l_bosH1+l_cisdH4+l_cisdH1+l_dol;
+  const longConf   = longScore >= 3;
 
   if (!isLong && !shortConf) return null;
   if (isLong  && !longConf)  return null;
