@@ -1199,12 +1199,26 @@ function detectExecutionOnBars(anals, px) {
   const htfConfirmed = true;
   if (!px) return null;
 
-  // ── 1b. Session gate — reject pure Asia sessions only ──
-  // H4 inKZ_ already verified in analyzeICT. We additionally reject Asia-only.
-  // Keep: London, New York, Lunch overlap (valid ICT Silver Bullet windows)
-  // Reject: Asia only (no structural validity for Gold intraday ICT)
-  const activeSession = h1.session || h4.session || '';
-  if (activeSession === 'Asia') return null;
+  // ── 1b. Session gate — hard hhmm check on H1 bar to prevent H4 session bleed ──
+  // H4 bars opened in NY (20:00 ET) close at midnight → h4.session='New York' bleeds into Asia
+  // Use H1 last-candle timestamp for precise ET hhmm check
+  const h1LastTs = h1.last?.t;
+  let barHhmm = -1;
+  if (h1LastTs) {
+    try {
+      const d = new Date(typeof h1LastTs==='number'&&h1LastTs<1e12 ? h1LastTs*1000 : h1LastTs);
+      const s = d.toLocaleString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hour12:false});
+      barHhmm = parseInt(s.replace(':',''));
+    } catch(_) {}
+  }
+  // Valid KZ windows: London 02:00-05:00 ET, NY 08:30-11:00 ET
+  // Also allow: NY afternoon overlap 13:00-16:00 ET (Silver Bullet / PM session)
+  // Reject: midnight & early morning 00:00-01:59 ET (Asia dead zone)
+  const inLdnKZ = barHhmm >= 200 && barHhmm <= 500;
+  const inNyKZ  = barHhmm >= 830 && barHhmm <= 1100;
+  const inPmKZ  = barHhmm >= 1300 && barHhmm <= 1600;
+  const inValidKZ = barHhmm < 0 || inLdnKZ || inNyKZ || inPmKZ; // <0 = no ts available, allow
+  if (!inValidKZ) return null; // midnight/Asia dead zone — reject
 
   // ── 2. Directional bias (must be clear) ───────────────────────────────
   const bias = (h4.bias || 0) * 0.4 + (h1.bias || 0) * 0.35 + (m15.bias || 0) * 0.25;
